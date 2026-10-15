@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Offline Field Survey</title>
+<style>
+  body {
+    font-family: sans-serif;
+    padding: 20px;
+    max-width: 500px;
+    margin: auto;
+    background: #f0f2f5;
+  }
+  h1 { font-size: 22px; }
+  button {
+    display: block;
+    width: 100%;
+    padding: 15px;
+    margin: 10px 0;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    font-size: 16px;
+  }
+  button:disabled { background: #999; }
+  #result {
+    margin-top: 20px;
+    white-space: pre-wrap;
+    background: #fff;
+    padding: 12px;
+    border-radius: 5px;
+    border: 1px solid #ddd;
+    font-size: 14px;
+  }
+  .record {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    padding: 10px;
+    margin: 10px 0;
+    font-size: 13px;
+  }
+  .record img {
+    max-width: 100%;
+    border-radius: 4px;
+    margin-top: 6px;
+  }
+  #records { margin-top: 20px; }
+  .status {
+    font-size: 12px;
+    color: #666;
+    text-align: center;
+    margin-top: 8px;
+  }
+</style>
+</head>
+<body>
+  <h1>Offline Field Survey</h1>
+
+  <button id="btn-location">1. Capture GPS</button>
+  <button id="btn-camera">2. Capture Photo</button>
+  <button id="btn-save" disabled>3. Save Record</button>
+
+  <div id="result">No data captured yet.</div>
+  <div class="status" id="status"></div>
+
+  <h2 style="font-size:18px;">Saved Records</h2>
+  <div id="records"></div>
+
+<script>
+const resultDiv = document.getElementById('result');
+const statusDiv = document.getElementById('status');
+const recordsDiv = document.getElementById('records');
+const btnSave = document.getElementById('btn-save');
+
+let pending = { lat: null, lon: null, accuracy: null, photo: null, timestamp: null };
+
+// ---------- IndexedDB setup ----------
+const DB_NAME = 'fieldSurveyDB';
+const STORE = 'records';
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function saveRecord(record) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).add(record);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getAllRecords() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readonly');
+    const req = tx.objectStore(STORE).getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// ---------- GPS ----------
+document.getElementById('btn-location').addEventListener('click', () => {
+  if (!navigator.geolocation) {
+    resultDiv.textContent = 'Geolocation not supported.';
+    return;
+  }
+  resultDiv.textContent = 'Fetching GPS...';
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      pending.lat = pos.coords.latitude;
+      pending.lon = pos.coords.longitude;
+      pending.accuracy = pos.coords.accuracy;
+      resultDiv.textContent =
+        `✅ GPS captured\nLat: ${pending.lat}\nLon: ${pending.lon}\nAccuracy: ${pending.accuracy} m`;
+      checkReady();
+    },
+    (err) => {
+      resultDiv.textContent = `GPS error (${err.code}): ${err.message}`;
+    },
+    { enableHighAccuracy: true, timeout: 15000 }
+  );
+});
+
+// ---------- Camera ----------
+const btnCamera = document.getElementById('btn-camera');
+const fileInput = document.createElement('input');
+fileInput.type = 'file';
+fileInput.accept = 'image/*';
+fileInput.capture = 'environment';
+fileInput.style.display = 'none';
+document.body.appendChild(fileInput);
+
+btnCamera.addEventListener('click', () => fileInput.click());
+
+fileInput.addEventListener('change', (event) => {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    pending.photo = reader.result; // base64 data URL
+    resultDiv.textContent =
+      `✅ Photo captured\n${file.name} (${(file.size/1024/1024).toFixed(2)} MB)`;
+    checkReady();
+  };
+  reader.readAsDataURL(file);
+  fileInput.value = ''; // allow re-selecting same file
+});
+
+// ---------- Save ----------
+function checkReady() {
+  const ready = pending.lat !== null && pending.photo !== null;
+  btnSave.disabled = !ready;
+  if (ready) statusDiv.textContent = 'Ready to save.';
+  else statusDiv.textContent = 'Need GPS + photo before saving.';
+}
+
+btnSave.addEventListener('click', async () => {
+  pending.timestamp = new Date().toISOString();
+  try {
+    await saveRecord({ ...pending });
+    resultDiv.textContent =
+      `💾 Saved!\nLat: ${pending.lat}\nLon: ${pending.lon}\nTime: ${pending.timestamp}`;
+    pending = { lat: null, lon: null, accuracy: null, photo: null, timestamp: null };
+    checkReady();
+    loadRecords();
+  } catch (e) {
+    resultDiv.textContent = 'Save failed: ' + e.message;
+  }
+});
+
+// ---------- Display saved records ----------
+async function loadRecords() {
+  const records = await getAllRecords();
+  if (records.length === 0) {
+    recordsDiv.innerHTML = '<em>No saved records.</em>';
+    return;
+  }
+  recordsDiv.innerHTML = '';
+  records.reverse().forEach((r) => {
+    const div = document.createElement('div');
+    div.className = 'record';
+    const info = document.createElement('div');
+    info.textContent =
+      `📍 ${r.lat.toFixed(6)}, ${r.lon.toFixed(6)} (±${r.accuracy}m)\n🕒 ${r.timestamp}`;
+    div.appendChild(info);
+    if (r.photo) {
+      const img = document.createElement('img');
+      img.src = r.photo;
+      div.appendChild(img);
+    }
+    recordsDiv.appendChild(div);
+  });
+}
+
+// ---------- Clear all (small button) ----------
+const btnClear = document.createElement('button');
+btnClear.textContent = 'Clear all records';
+btnClear.style.background = '#dc3545';
+btnClear.addEventListener('click', async () => {
+  if (!confirm('Delete all saved records?')) return;
+  const db = await openDB();
+  const tx = db.transaction(STORE, 'readwrite');
+  tx.objectStore(STORE).clear();
+  tx.oncomplete = () => loadRecords();
+});
+document.body.appendChild(btnClear);
+
+// ---------- Init ----------
+loadRecords();
+</script>
+</body>
+</html>
